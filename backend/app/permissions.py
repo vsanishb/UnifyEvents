@@ -16,3 +16,11 @@ class IsAdminOrAssignedOrganiser(permissions.BasePermission):
         if request.user.role == 'organiser':
             return obj.organisers.filter(user=request.user).exists()
         return False
+
+
+class IsAdminOnly(permissions.BasePermission):
+    """
+    Permission check to verify if the requesting user is an Admin.
+    """
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated and request.user.role == 'admin'

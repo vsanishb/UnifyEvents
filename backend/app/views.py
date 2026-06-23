@@ -10,6 +10,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from .models import *
 from .serializers import *
+from .permissions import IsAdminOnly
 
 
 from django.http import JsonResponse
@@ -94,6 +95,9 @@ class EventViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         kwargs['partial'] = True
+        # Verify permissions: only admin can modify event organisers
+        if 'organisers' in request.data and request.user.role != 'admin':
+            return Response({"detail": "Only admin can assign or unassign organisers from events."}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
@@ -401,10 +405,111 @@ class EventDetailsViewSet(viewsets.ModelViewSet):
 
 
 
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.db.models import Count, Q
+
+User = get_user_model()
+
+
 class OrganiserViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminOnly]
     queryset = Organiser.objects.all()
     serializer_class = OrganiserSerializer
+
+    def get_queryset(self):
+        # Base annotated query with prefetching to optimize query count
+        qs = Organiser.objects.select_related('user').prefetch_related('events').annotate(
+            assigned_events_count=Count('events')
+        ).order_by('user__username')
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(user__username__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(user__email__icontains=search)
+            )
+        return qs
+
+    @action(detail=False, methods=['get'], url_path='non-organisers')
+    def non_organisers(self, request):
+        qs = User.objects.exclude(role__in=['admin', 'organiser']).order_by('username')
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(email__icontains=search)
+            )
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = NonOrganiserUserSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = NonOrganiserUserSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='promote')
+    @transaction.atomic
+    def promote(self, request):
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({"detail": "user_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            target_user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if target_user.role == 'admin':
+            return Response({"detail": "Cannot promote admin users."}, status=status.HTTP_400_BAD_REQUEST)
+        if target_user.role == 'organiser':
+            return Response({"detail": "User is already an organiser."}, status=status.HTTP_400_BAD_REQUEST)
+
+        target_user.role = 'organiser'
+        target_user.save()
+
+        # Create Organiser profile
+        organiser, created = Organiser.objects.get_or_create(user=target_user)
+
+        return Response({
+            "detail": f"Successfully promoted {target_user.username or target_user.email} to organiser.",
+            "organiser_id": organiser.id
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='demote')
+    @transaction.atomic
+    def demote(self, request):
+        organiser_id = request.data.get('organiser_id')
+        if not organiser_id:
+            return Response({"detail": "organiser_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            organiser = Organiser.objects.get(id=organiser_id)
+        except Organiser.DoesNotExist:
+            return Response({"detail": "Organiser not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Demote allowed only if assigned events count is 0
+        assigned_events_count = organiser.events.count()
+        if assigned_events_count > 0:
+            return Response({
+                "detail": f"Cannot remove organiser role. This user is still assigned to {assigned_events_count} event(s). Please unassign them from all events first."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        target_user = organiser.user
+        target_user.role = 'participant'
+        target_user.save()
+
+        # Delete the Organiser profile
+        organiser.delete()
+
+        return Response({
+            "detail": f"Successfully removed organiser role from {target_user.username or target_user.email}."
+        }, status=status.HTTP_200_OK)
 
 
 

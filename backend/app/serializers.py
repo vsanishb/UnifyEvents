@@ -7,14 +7,44 @@ from django.contrib.auth import get_user_model
 User = get_user_model()
 
 
+class NonOrganiserUserSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'role', 'name']
+
+    def get_name(self, obj):
+        full_name = f"{obj.first_name} {obj.last_name}".strip()
+        return full_name if full_name else (obj.username or obj.email)
+
+
 class OrganiserSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    username = serializers.CharField(source='user.username', read_only=True)
+    email = serializers.CharField(source='user.email', read_only=True)
+    role = serializers.CharField(source='user.role', read_only=True)
+    assigned_events_count = serializers.IntegerField(read_only=True, default=0)
+    assigned_events = serializers.SerializerMethodField()
     user_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Organiser
-        fields = ['id', 'user', 'user_display']   
+        fields = [
+            'id', 'user', 'name', 'username', 'email', 'role',
+            'assigned_events_count', 'assigned_events', 'user_display'
+        ]
+
+    def get_name(self, obj):
+        full_name = f"{obj.user.first_name} {obj.user.last_name}".strip()
+        return full_name if full_name else (obj.user.username or obj.user.email)
+
+    def get_assigned_events(self, obj):
+        # Access obj.events via prefetched relation
+        return [{"id": e.id, "name": e.name} for e in obj.events.all()]
+
     def get_user_display(self, obj):
-        return f"{obj.user.username} ({obj.user.email})"
+        return f"{obj.user.username or obj.user.email} ({obj.user.email})"
 
     def validate_user(self, value):
         if value.role != 'organiser':
