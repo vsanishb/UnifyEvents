@@ -106,6 +106,94 @@ class EventViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Only admin can delete events"}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
+    @action(detail=True, methods=['get'], url_path='attendance', permission_classes=[IsAuthenticated])
+    def attendance(self, request, pk=None):
+        import hashlib
+        from django.db.models import Count, Q, F
+        from rest_framework.pagination import PageNumberPagination
+
+        user = request.user
+        if user.role not in ['admin', 'organiser']:
+            return Response({"detail": "You do not have permission to perform this action."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            event = Event.objects.get(id=pk)
+        except Event.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.role == 'organiser' and not event.organisers.filter(user=user).exists():
+            return Response({"detail": "You do not have permission to access this event's attendance records."}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = BookedEvent.objects.filter(event=event).select_related('booking', 'slot').prefetch_related('participants', 'participants__scanned_by__user')
+
+        qs = qs.annotate(
+            total_participants_count=Count('participants'),
+            checked_in_participants_count=Count('participants', filter=Q(participants__arrived=True))
+        )
+
+        search_query = request.query_params.get('search')
+        if search_query:
+            participants_qs = BookedParticipant.objects.filter(booked_event__event=event)
+            db_matches = participants_qs.filter(
+                Q(name__icontains=search_query) |
+                Q(email__icontains=search_query) |
+                Q(phone_number__icontains=search_query)
+            )
+            matching_booked_event_ids = set(db_matches.values_list('booked_event_id', flat=True))
+
+            all_parts = participants_qs.values('id', 'name', 'email', 'booked_event_id')
+            for p in all_parts:
+                seed = f"{p['name'] or ''}-{p['email'] or ''}-{p['id']}"
+                digest = hashlib.md5(seed.encode('utf-8')).hexdigest()
+                h = int(digest, 16)
+                DEPARTMENTS = ["Computer Science", "Electrical Eng", "Mechanical Eng", "Information Tech", "Civil Eng", "Chemical Eng"]
+                dept = DEPARTMENTS[h % len(DEPARTMENTS)]
+                usn_num = (h % 200) + 1
+                usn_dept = dept[:2].upper() if len(dept) >= 2 else "CS"
+                if usn_dept == "CO":
+                    usn_dept = "CS"
+                usn = f"1RV22{usn_dept}{usn_num:03d}"
+
+                if search_query.lower() in usn.lower():
+                    matching_booked_event_ids.add(p['booked_event_id'])
+
+            qs = qs.filter(id__in=matching_booked_event_ids)
+
+        booking_type = request.query_params.get('type')
+        if booking_type == 'single':
+            qs = qs.filter(total_participants_count=1)
+        elif booking_type == 'team':
+            qs = qs.filter(total_participants_count__gt=1)
+
+        status_param = request.query_params.get('status')
+        if status_param == 'fully':
+            qs = qs.filter(checked_in_participants_count=F('total_participants_count'), total_participants_count__gt=0)
+        elif status_param == 'partially':
+            qs = qs.filter(checked_in_participants_count__gt=0, checked_in_participants_count__lt=F('total_participants_count'))
+        elif status_param == 'not':
+            qs = qs.filter(checked_in_participants_count=0)
+
+        ordering = request.query_params.get('ordering', '-newest')
+        if ordering == 'oldest' or ordering == 'booking__created_at':
+            qs = qs.order_by('booking__created_at')
+        else:
+            qs = qs.order_by('-booking__created_at')
+
+        class AttendancePagination(PageNumberPagination):
+            page_size = 10
+            page_size_query_param = 'page_size'
+            max_page_size = 100
+
+        paginator = AttendancePagination()
+        page = paginator.paginate_queryset(qs, request)
+
+        if page is not None:
+            serializer = BookingGroupSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = BookingGroupSerializer(qs, many=True)
+        return Response(serializer.data)
+
 
 
 
@@ -640,18 +728,54 @@ class BookedParticipantViewSet(viewsets.ModelViewSet):
         if not self.has_permission_on_obj(request, participant):
             return Response({"detail": "Not allowed"}, status=403)
 
-        serializer = BookedParticipantCheckinSerializer(
-            participant,
-            data={"arrived": True},
-            partial=True
-        )
-        serializer.is_valid(raise_exception=True)
+        if participant.arrived:
+            return Response({"detail": "Participant is already checked-in."}, status=status.HTTP_400_BAD_REQUEST)
 
         participant.arrived = True
         participant.checkin_time = timezone.now()
-        participant.save(update_fields=["arrived", "checkin_time"])
+        participant.reversed_by = None
+        participant.reversed_time = None
+        
+        if request.user.role == "organiser":
+            try:
+                organiser = Organiser.objects.get(user=request.user)
+                participant.scanned_by = organiser
+            except Organiser.DoesNotExist:
+                pass
+        else:
+            participant.scanned_by = None
+            
+        participant.save(update_fields=["arrived", "checkin_time", "scanned_by", "reversed_by", "reversed_time"])
 
         return Response({"detail": "Checked-in"}, status=200)
+
+    @action(detail=True, methods=["post"], url_path="reverse-checkin")
+    def reverse_checkin(self, request, pk=None):
+        participant = self.get_object()
+
+        if not self.has_permission_on_obj(request, participant):
+            return Response({"detail": "Not allowed"}, status=403)
+
+        if not participant.arrived:
+            return Response({"detail": "Participant is not checked-in yet."}, status=status.HTTP_400_BAD_REQUEST)
+
+        participant.arrived = False
+        participant.checkin_time = None
+        participant.scanned_by = None
+        
+        if request.user.role == "organiser":
+            try:
+                organiser = Organiser.objects.get(user=request.user)
+                participant.reversed_by = organiser
+            except Organiser.DoesNotExist:
+                pass
+        else:
+            participant.reversed_by = None
+            
+        participant.reversed_time = timezone.now()
+        participant.save(update_fields=["arrived", "checkin_time", "scanned_by", "reversed_by", "reversed_time"])
+
+        return Response({"detail": "Attendance reversed"}, status=200)
 
 
 

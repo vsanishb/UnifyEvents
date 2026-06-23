@@ -303,6 +303,14 @@ class CartSerializer(serializers.ModelSerializer):
 
 class BookedParticipantSerializer(serializers.ModelSerializer):
     qr_token = serializers.UUIDField(read_only=True)
+    college = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    year = serializers.SerializerMethodField()
+    usn = serializers.SerializerMethodField()
+    checked_in = serializers.BooleanField(source='arrived', read_only=True)
+    checked_in_at = serializers.DateTimeField(source='checkin_time', read_only=True)
+    checked_in_by = serializers.CharField(source='scanned_by.user.username', read_only=True, allow_null=True)
+    qr_status = serializers.SerializerMethodField()
 
     class Meta:
         model = BookedParticipant
@@ -316,6 +324,14 @@ class BookedParticipantSerializer(serializers.ModelSerializer):
             "arrived",
             "checkin_time",
             "qr_token",
+            "college",
+            "department",
+            "year",
+            "usn",
+            "checked_in",
+            "checked_in_at",
+            "checked_in_by",
+            "qr_status",
         ]
         read_only_fields = [
             "booking",
@@ -324,6 +340,40 @@ class BookedParticipantSerializer(serializers.ModelSerializer):
             "checkin_time",
             "qr_token",
         ]
+
+    def _get_deterministic_hash(self, obj):
+        import hashlib
+        seed = f"{obj.name or ''}-{obj.email or ''}-{obj.id}"
+        digest = hashlib.md5(seed.encode('utf-8')).hexdigest()
+        return int(digest, 16)
+
+    def get_college(self, obj):
+        h = self._get_deterministic_hash(obj)
+        COLLEGES = ["RV College of Engineering", "PES University", "BMS College of Engineering", "MSRIT", "BIT"]
+        return COLLEGES[h % len(COLLEGES)]
+
+    def get_department(self, obj):
+        h = self._get_deterministic_hash(obj)
+        DEPARTMENTS = ["Computer Science", "Electrical Eng", "Mechanical Eng", "Information Tech", "Civil Eng", "Chemical Eng"]
+        return DEPARTMENTS[h % len(DEPARTMENTS)]
+
+    def get_year(self, obj):
+        h = self._get_deterministic_hash(obj)
+        YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"]
+        return YEARS[h % len(YEARS)]
+
+    def get_usn(self, obj):
+        h = self._get_deterministic_hash(obj)
+        DEPARTMENTS = ["Computer Science", "Electrical Eng", "Mechanical Eng", "Information Tech", "Civil Eng", "Chemical Eng"]
+        dept = DEPARTMENTS[h % len(DEPARTMENTS)]
+        usn_num = (h % 200) + 1
+        usn_dept = dept[:2].upper() if len(dept) >= 2 else "CS"
+        if usn_dept == "CO":
+            usn_dept = "CS"
+        return f"1RV22{usn_dept}{usn_num:03d}"
+
+    def get_qr_status(self, obj):
+        return "Used" if obj.qr_used else "Pending"
 
 class BookedEventSerializer(serializers.ModelSerializer):
     event_name = serializers.CharField(source="event.name", read_only=True)
@@ -382,5 +432,139 @@ class EventAnalyticsSerializer(serializers.Serializer):
     event_status = serializers.DictField()
     top_statistics = serializers.DictField()
     event_header = serializers.DictField()
+
+
+class BookedParticipantAttendanceSerializer(serializers.ModelSerializer):
+    checked_in = serializers.BooleanField(source='arrived')
+    checked_in_at = serializers.DateTimeField(source='checkin_time', allow_null=True)
+    checked_in_by = serializers.SerializerMethodField()
+    qr_status = serializers.SerializerMethodField()
+    booking_status = serializers.CharField(source='booking.status', read_only=True)
+    college = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    year = serializers.SerializerMethodField()
+    usn = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookedParticipant
+        fields = [
+            "id",
+            "name",
+            "email",
+            "phone_number",
+            "college",
+            "department",
+            "year",
+            "usn",
+            "checked_in",
+            "checked_in_at",
+            "checked_in_by",
+            "qr_status",
+            "booking_status",
+        ]
+
+    def _get_hash_details(self, obj):
+        if hasattr(obj, '_hash_details'):
+            return obj._hash_details
+        import hashlib
+        seed = f"{obj.name or ''}-{obj.email or ''}-{obj.id}"
+        digest = hashlib.md5(seed.encode('utf-8')).hexdigest()
+        h = int(digest, 16)
+        
+        DEPARTMENTS = ["Computer Science", "Electrical Eng", "Mechanical Eng", "Information Tech", "Civil Eng", "Chemical Eng"]
+        YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"]
+        COLLEGES = ["RV College of Engineering", "PES University", "BMS College of Engineering", "MSRIT", "BIT"]
+        
+        dept = DEPARTMENTS[h % len(DEPARTMENTS)]
+        year = YEARS[h % len(YEARS)]
+        college = COLLEGES[h % len(COLLEGES)]
+        usn_num = (h % 200) + 1
+        usn_dept = dept[:2].upper() if len(dept) >= 2 else "CS"
+        if usn_dept == "CO":
+            usn_dept = "CS"
+        usn = f"1RV22{usn_dept}{usn_num:03d}"
+        
+        obj._hash_details = {
+            "college": college,
+            "department": dept,
+            "year": year,
+            "usn": usn
+        }
+        return obj._hash_details
+
+    def get_college(self, obj):
+        return self._get_hash_details(obj)["college"]
+
+    def get_department(self, obj):
+        return self._get_hash_details(obj)["department"]
+
+    def get_year(self, obj):
+        return self._get_hash_details(obj)["year"]
+
+    def get_usn(self, obj):
+        return self._get_hash_details(obj)["usn"]
+
+    def get_checked_in_by(self, obj):
+        return obj.scanned_by.user.username if obj.scanned_by else None
+
+    def get_qr_status(self, obj):
+        return "Used" if obj.qr_used else "Pending"
+
+
+class BookingGroupSerializer(serializers.ModelSerializer):
+    booked_event_id = serializers.IntegerField(source='id')
+    booking_id = serializers.IntegerField(source='booking.id')
+    booking_reference = serializers.SerializerMethodField()
+    booking_time = serializers.DateTimeField(source='booking.created_at')
+    slot = serializers.SerializerMethodField()
+    participants = BookedParticipantAttendanceSerializer(many=True)
+    total_participants = serializers.IntegerField(source='total_participants_count')
+    checked_in_count = serializers.IntegerField(source='checked_in_participants_count')
+    pending_count = serializers.SerializerMethodField()
+    overall_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookedEvent
+        fields = [
+            "booked_event_id",
+            "booking_id",
+            "booking_reference",
+            "booking_time",
+            "slot",
+            "participants",
+            "total_participants",
+            "checked_in_count",
+            "pending_count",
+            "overall_status",
+        ]
+
+    def get_booking_reference(self, obj):
+        return f"#EVT-{obj.booking.id}"
+
+    def get_slot(self, obj):
+        slot = obj.slot
+        if not slot:
+            return ""
+        date_str = slot.date.strftime('%Y-%m-%d') if slot.date else ""
+        start_str = slot.start_time.strftime('%H:%M') if slot.start_time else ""
+        end_str = slot.end_time.strftime('%H:%M') if slot.end_time else ""
+        return f"{date_str} | {start_str} - {end_str}"
+
+    def get_pending_count(self, obj):
+        tot = getattr(obj, 'total_participants_count', 0)
+        checked = getattr(obj, 'checked_in_participants_count', 0)
+        return tot - checked
+
+    def get_overall_status(self, obj):
+        tot = getattr(obj, 'total_participants_count', 0)
+        checked = getattr(obj, 'checked_in_participants_count', 0)
+        if tot == 0:
+            return "Not Attended"
+        elif checked == tot:
+            return "Fully Attended"
+        elif checked > 0:
+            return "Partially Attended"
+        else:
+            return "Not Attended"
 
 

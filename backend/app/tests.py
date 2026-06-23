@@ -75,3 +75,139 @@ class EventAnalyticsTestCase(TestCase):
         response = self.client.get("/events/99999/analytics/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+
+class EventAttendanceTestCase(EventAnalyticsTestCase):
+    def setUp(self):
+        super().setUp()
+        from .models import Booking, BookedEvent, BookedParticipant
+        
+        # Create a booking
+        self.booking = Booking.objects.create(
+            user=self.participant,
+            status="confirmed",
+            payment_status="paid",
+            total_amount=10.00
+        )
+        
+        # Create a BookedEvent
+        self.booked_event = BookedEvent.objects.create(
+            booking=self.booking,
+            event=self.event,
+            slot=self.slot,
+            participants_count=2,
+            unit_price=10.00,
+            line_total=20.00
+        )
+        
+        # Create BookedParticipant 1 (Not Checked In)
+        self.participant1 = BookedParticipant.objects.create(
+            booking=self.booking,
+            booked_event=self.booked_event,
+            name="Alice Smith",
+            email="alice@test.com",
+            phone_number="1234567890",
+            arrived=False
+        )
+        
+        # Create BookedParticipant 2 (Checked In)
+        self.participant2 = BookedParticipant.objects.create(
+            booking=self.booking,
+            booked_event=self.booked_event,
+            name="Bob Jones",
+            email="bob@test.com",
+            phone_number="0987654321",
+            arrived=True,
+            checkin_time=timezone.now(),
+            scanned_by=self.org_profile1
+        )
+
+    def test_attendance_access_control(self):
+        # Admin - 200 OK
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(f"/events/{self.event.id}/attendance/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Assigned Organiser - 200 OK
+        self.client.force_authenticate(user=self.organiser1)
+        response = self.client.get(f"/events/{self.event.id}/attendance/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Unassigned Organiser - 403 Forbidden
+        self.client.force_authenticate(user=self.organiser2)
+        response = self.client.get(f"/events/{self.event.id}/attendance/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Participant - 403 Forbidden
+        self.client.force_authenticate(user=self.participant)
+        response = self.client.get(f"/events/{self.event.id}/attendance/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_attendance_search_and_filters(self):
+        self.client.force_authenticate(user=self.admin)
+
+        # Basic list
+        response = self.client.get(f"/events/{self.event.id}/attendance/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["booked_event_id"], self.booked_event.id)
+
+        # Search by name
+        response = self.client.get(f"/events/{self.event.id}/attendance/?search=Alice")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+        response = self.client.get(f"/events/{self.event.id}/attendance/?search=Nonexistent")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+
+        # Filter status partially
+        response = self.client.get(f"/events/{self.event.id}/attendance/?status=partially")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+        # Filter status fully => 0
+        response = self.client.get(f"/events/{self.event.id}/attendance/?status=fully")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+
+        # Filter type single => 0
+        response = self.client.get(f"/events/{self.event.id}/attendance/?type=single")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+
+        # Filter type team => 1
+        response = self.client.get(f"/events/{self.event.id}/attendance/?type=team")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_participant_checkin_and_reverse(self):
+        self.client.force_authenticate(user=self.organiser1)
+
+        # Check-in Alice (Not Checked In initially)
+        response = self.client.post(f"/booked-participants/{self.participant1.id}/checkin/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.participant1.refresh_from_db()
+        self.assertTrue(self.participant1.arrived)
+        self.assertIsNotNone(self.participant1.checkin_time)
+        self.assertEqual(self.participant1.scanned_by, self.org_profile1)
+
+        # Attempt to check-in again -> 400 Bad Request
+        response = self.client.post(f"/booked-participants/{self.participant1.id}/checkin/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Reverse check-in Bob (Checked In initially)
+        response = self.client.post(f"/booked-participants/{self.participant2.id}/reverse-checkin/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.participant2.refresh_from_db()
+        self.assertFalse(self.participant2.arrived)
+        self.assertIsNone(self.participant2.checkin_time)
+        self.assertIsNone(self.participant2.scanned_by)
+        self.assertEqual(self.participant2.reversed_by, self.org_profile1)
+        self.assertIsNotNone(self.participant2.reversed_time)
+
+        # Attempt to reverse check-in again -> 400 Bad Request
+        response = self.client.post(f"/booked-participants/{self.participant2.id}/reverse-checkin/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+

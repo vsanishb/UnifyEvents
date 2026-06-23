@@ -342,6 +342,8 @@ class BookedParticipant(models.Model):
     arrived = models.BooleanField(default=False)
     checkin_time = models.DateTimeField(blank=True, null=True)
     scanned_by = models.ForeignKey('Organiser', null=True, blank=True, on_delete=models.SET_NULL, related_name='scanned_participants')
+    reversed_by = models.ForeignKey('Organiser', null=True, blank=True, on_delete=models.SET_NULL, related_name='reversed_participants')
+    reversed_time = models.DateTimeField(blank=True, null=True)
 
     # 🔥 STEP 1 (NO UNIQUE YET)
     qr_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
