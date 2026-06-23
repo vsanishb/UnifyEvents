@@ -369,3 +369,18 @@ class BookedParticipantCheckinSerializer(serializers.ModelSerializer):
         model = BookedParticipant
         fields = ["arrived"]
 
+
+class EventAnalyticsSerializer(serializers.Serializer):
+    overview = serializers.DictField()
+    registration_timeline = serializers.DictField()
+    ticket_analytics = serializers.DictField()
+    slot_analytics = serializers.ListField()
+    revenue_analytics = serializers.DictField()
+    attendance_analytics = serializers.DictField()
+    participant_insights = serializers.DictField()
+    organiser_analytics = serializers.DictField()
+    event_status = serializers.DictField()
+    top_statistics = serializers.DictField()
+    event_header = serializers.DictField()
+
+

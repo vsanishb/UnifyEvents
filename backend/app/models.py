@@ -48,6 +48,9 @@ class Event(models.Model):
         Organiser, related_name='events', blank=True
     )
 
+    invalid_qr_scans = models.PositiveIntegerField(default=0)
+    rejected_scans = models.PositiveIntegerField(default=0)
+
     def __str__(self):
         return self.name
 
@@ -338,6 +341,7 @@ class BookedParticipant(models.Model):
     # Attendance
     arrived = models.BooleanField(default=False)
     checkin_time = models.DateTimeField(blank=True, null=True)
+    scanned_by = models.ForeignKey('Organiser', null=True, blank=True, on_delete=models.SET_NULL, related_name='scanned_participants')
 
     # 🔥 STEP 1 (NO UNIQUE YET)
     qr_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)

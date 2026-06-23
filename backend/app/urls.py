@@ -34,6 +34,8 @@ urlpatterns = [
         name="secure-event-image",
     ),
 
+    path("events/<int:event_id>/analytics/", EventAnalyticsAPIView.as_view(), name="event-analytics"),
+
     path("checkin/qr/", QRCheckinView.as_view()),
     path(
         "health/",
